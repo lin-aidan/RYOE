@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PHI EPA — Plays</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; margin:20px; color:#111 }
+    header { display:flex; align-items:center; gap:16px; margin-bottom:12px }
+    h1 { font-size:18px; margin:0 }
+    #controls { margin-left:auto }
+    select { font-size:14px; padding:6px }
+    .chart { margin-top:16px; border:1px solid #eee; padding:8px; background:#fafafa; position:relative }
+    canvas { width:100%; height:300px; display:block }
+    .tooltip { position:absolute; pointer-events:none; background:rgba(0,0,0,0.85); color:#fff; padding:6px 8px; border-radius:4px; font-size:12px; white-space:nowrap; transform:translate(8px,-8px); display:none }
+    .note { font-size:13px; color:#555; margin-top:8px }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Philadelphia Eagles — EPA per Play</h1>
+    <div id="controls">
+      <label for="weekSelect">Week: </label>
+      <select id="weekSelect"></select>
+    </div>
+  </header>
+
+  <section class="chart">
+    <strong>EPA per Play</strong>
+    <canvas id="chart1" width="900" height="300"></canvas>
+  </section>
+
+  <section class="chart">
+    <strong>Cumulative EPA</strong>
+    <canvas id="chart2" width="900" height="300"></canvas>
+  </section>
+
+  <div id="tooltip" class="tooltip" aria-hidden="true"></div>
+
+  <p class="note">Tip: Run a local static server (for example `python3 -m http.server`) and open this page at <code>http://localhost:8000/index.html</code>.</p>
+
+  <script>
+  // Minimal CSV parser (assumes no commas inside fields)
+  function parseCSV(text){
+    const lines = text.trim().split(/\r?\n/);
+    const header = lines[0].split(',').map(h=>h.trim());
+    const rows = [];
+    for(let i=1;i<lines.length;i++){
+      const line = lines[i];
+      if(!line) continue;
+      const cols = line.split(',');
+      const obj = {};
+      for(let j=0;j<header.length;j++){
+        obj[header[j]] = cols[j] === undefined ? '' : cols[j];
+      }
+      rows.push(obj);
+    }
+    return rows;
+  }
+
+  // fetch CSV and initialize UI
+  let dataRows = [];
+  fetch('PHI_epa.csv')
+    .then(r=>r.text())
+    .then(txt=>{
+      dataRows = parseCSV(txt).map(r=>({
+        week: Number(r.week),
+        play_number: Number(r.play_number),
+        home_team: r.home_team,
+        away_team: r.away_team,
+        posteam: r.posteam,
+        PHI_epa: r.PHI_epa === 'NULL' || r.PHI_epa === '' ? null : Number(r.PHI_epa)
+      }));
+      init();
+    })
+    .catch(err=>{
+      console.error('Failed to load CSV:', err);
+      alert('Failed to load PHI_epa.csv. Serve this folder via a static server and reload.');
+    });
+
+  function distinctWeeks(rows){
+    const s = new Set();
+    rows.forEach(r=>{ if(!isNaN(r.week)) s.add(r.week) });
+    return Array.from(s).sort((a,b)=>a-b);
+  }
+
+  function init(){
+    const weeks = distinctWeeks(dataRows);
+    const sel = document.getElementById('weekSelect');
+    weeks.forEach(w=>{
+      const opt = document.createElement('option'); opt.value = w; opt.textContent = 'Week ' + w; sel.appendChild(opt);
+    });
+    sel.addEventListener('change', ()=> renderWeek(Number(sel.value)));
+    if(weeks.length) {
+      sel.value = weeks[0];
+      renderWeek(weeks[0]);
+    }
+    window.addEventListener('resize', ()=> renderWeek(Number(sel.value)) );
+  }
+
+  function renderWeek(week){
+    const rows = dataRows.filter(r=>r.week===week).filter(r=>r.PHI_epa!==null);
+    rows.sort((a,b)=>a.play_number - b.play_number);
+    const x = rows.map(r=>r.play_number);
+    const y = rows.map(r=>r.PHI_epa);
+    const cum = [];
+    let sum = 0;
+    for(const v of y){ sum += v; cum.push(sum); }
+
+    drawLine(document.getElementById('chart1'), x, y, {yLabel:'EPA'});
+    drawLine(document.getElementById('chart2'), x, cum, {yLabel:'Cumulative EPA'});
+  }
+
+  // Basic line chart on canvas
+  function drawLine(canvas, xs, ys, opts={}){
+    // adapt canvas size to CSS size for crisp rendering
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    canvas.width = Math.floor(cssW * devicePixelRatio);
+    canvas.height = Math.floor(cssH * devicePixelRatio);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+    ctx.clearRect(0,0,cssW,cssH);
+
+    const margin = {left:50, right:12, top:12, bottom:30};
+    const w = cssW - margin.left - margin.right;
+    const h = cssH - margin.top - margin.bottom;
+    if(xs.length===0){
+      ctx.fillStyle='#666'; ctx.fillText('No data for this week', margin.left+10, margin.top+20); return;
+    }
+
+    const xMin = Math.min(...xs);
+    const xMax = Math.max(...xs);
+    const yMin = Math.min(...ys);
+    const yMax = Math.max(...ys);
+    const yPad = Math.max(0.1, (yMax - yMin) * 0.1);
+    const y0 = yMin - yPad;
+    const y1 = yMax + yPad;
+
+    const xScale = v => margin.left + ((v - xMin) / (xMax - xMin || 1)) * w;
+    const yScale = v => margin.top + h - ((v - y0) / (y1 - y0 || 1)) * h;
+
+    // grid lines and ticks
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for(let i=0;i<=4;i++){
+      const gy = margin.top + (h * i / 4);
+      ctx.moveTo(margin.left, gy); ctx.lineTo(margin.left + w, gy);
+    }
+    ctx.stroke();
+
+    // axes
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, margin.top + h);
+    ctx.lineTo(margin.left + w, margin.top + h);
+    ctx.stroke();
+
+    // y ticks
+    ctx.fillStyle='#333'; ctx.font='12px sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
+    for(let i=0;i<=4;i++){
+      const val = y0 + (y1 - y0) * (1 - i/4);
+      const ty = margin.top + (h * i / 4);
+      ctx.fillText(val.toFixed(2), margin.left - 8, ty);
+    }
+
+    // x ticks (start, middle, end)
+    ctx.textAlign='center'; ctx.textBaseline='top';
+    const xticks = [xMin, Math.floor((xMin+xMax)/2), xMax];
+    xticks.forEach(v=>{
+      const tx = xScale(v);
+      ctx.fillText(String(v), tx, margin.top + h + 6);
+    });
+
+    // line
+    ctx.beginPath(); ctx.lineWidth = 2; ctx.strokeStyle = '#1f77b4'; ctx.lineJoin='round';
+    for(let i=0;i<xs.length;i++){
+      const px = xScale(xs[i]);
+      const py = yScale(ys[i]);
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+
+    // points
+    ctx.fillStyle = '#1f77b4';
+    for(let i=0;i<xs.length;i++){
+      const px = xScale(xs[i]); const py = yScale(ys[i]);
+      ctx.beginPath(); ctx.arc(px,py,2.5,0,Math.PI*2); ctx.fill();
+    }
+
+    // y label
+    ctx.save(); ctx.translate(12, cssH/2); ctx.rotate(-Math.PI/2);
+    ctx.textAlign='center'; ctx.fillStyle='#222'; ctx.font='13px sans-serif';
+    ctx.fillText(opts.yLabel || '', 0,0);
+    ctx.restore();
+
+    // store plot info for interactivity
+    canvas._plot = {
+      xs: xs,
+      ys: ys,
+      xMin: xMin,
+      xMax: xMax,
+      y0: y0,
+      y1: y1,
+      margin: margin,
+      w: w,
+      h: h
+    };
+
+    // attach mouse handlers once
+    if(!canvas._hasHandlers){
+      const tip = document.getElementById('tooltip');
+      canvas.addEventListener('mousemove', function(e){
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left; // CSS pixels
+        const my = e.clientY - rect.top;
+        const p = canvas._plot;
+        if(!p || p.xs.length===0){ tip.style.display='none'; return; }
+        // compute data x value from mouse x
+        const dataX = p.xMin + ((mx - p.margin.left) / (p.w || 1)) * (p.xMax - p.xMin || 1);
+        // find nearest index by x
+        let best = 0; let bestD = Infinity;
+        for(let i=0;i<p.xs.length;i++){ const d = Math.abs(p.xs[i] - dataX); if(d<bestD){ bestD=d; best=i; } }
+        const px = p.margin.left + ((p.xs[best] - p.xMin) / (p.xMax - p.xMin || 1)) * p.w;
+        const py = p.margin.top + p.h - ((p.ys[best] - p.y0) / (p.y1 - p.y0 || 1)) * p.h;
+        const pageX = rect.left + px; const pageY = rect.top + py;
+        tip.innerHTML = 'Play: <strong>' + p.xs[best] + '</strong><br>EPA: <strong>' + (p.ys[best]).toFixed(3) + '</strong>';
+        tip.style.left = (pageX + 10) + 'px';
+        tip.style.top = (pageY - 8) + 'px';
+        tip.style.display = 'block';
+      });
+      canvas.addEventListener('mouseleave', function(){ const tip = document.getElementById('tooltip'); if(tip) tip.style.display='none'; });
+      canvas._hasHandlers = true;
+    }
+  }
+  </script>
+</body>
+</html>
